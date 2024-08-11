@@ -383,12 +383,200 @@ class QmioBackend(BackendV2):
         self.disconnect()
         del self._QPUBackend
         self._QPUBackend=None
-    
-            
-            
-    
-    
-    def run(self, run_input: Union[Union[QuantumCircuit,Schedule, str],List[Union[QuantumCircuit,Schedule,str]]], **options) -> QmioJob:
+
+    def _run(self):
+        """
+        Just runs a set of circuits
+        """
+        pass
+
+    def _connect_and_run_disconnect(self, run_input: Union[Union[QuantumCircuit,Schedule, str],List[Union[QuantumCircuit,Schedule,str]]], **options) -> QmioJob:
+        """
+        Full routine method
+        """
+        if isinstance(options,Options):
+            shots=options.get("shots",default=self._options.get("shots"))
+            memory=options.get("memory",default=self._options.get("memory"))
+            repetition_period=options.get("repetition_period",default=self._options.get("repetition_period"))
+            res_format=options.get("res_format",default=self._options.get("res_format"))
+        else:
+            if "shots" in options:
+                shots=options["shots"]
+            else:
+                shots=self._options.get("shots")
+
+            if "memory" in options:
+                memory=options["memory"]
+            else:
+                memory=self._options.get("memory")
+
+            if "repetition_period" in options:
+                repetition_period=options["repetition_period"]
+            else:
+                repetition_period=self._options.get("repetition_period")
+
+            if "res_format" in options:
+                res_format=options["res_format"]
+            else:
+                res_format=self._options.get("res_format")
+
+        self._logger.info("Requested parameters: Shots %d - memory %s - Repetition_period %s - Res_format %s"%(shots, memory, str(repetition_period), res_format))
+
+        if res_format not in FORMATS:
+            raise QmioException("Format %s not in available formats:%s"%(res_format,FORMATS))
+
+        if isinstance(run_input,str) and not "OPENQASM" in run_input:
+            raise QmioException("Input seems not to be a valid OPENQASM 3.0 file...")
+
+        if isinstance(run_input,QuantumCircuit) or isinstance(run_input,Schedule) or isinstance(run_input,str):
+            circuits=[run_input]
+        else:
+            circuits=run_input
+
+        if shots*len(circuits) > self.max_shots:
+            raise QmioException("Total number of shots %d larger than capacity %d"%(shots,self.max_shots))
+
+        #self._logger.debug("Starting QmioRuntimeService")
+        #service = QmioRuntimeService()
+
+        if self._QPUBackend is None:
+            self._logger.debug("Starting backend")
+            self._QPUBackend=QPUBackend()
+            self._QPUBackend.connect()
+
+
+        job_id=uuid.uuid4()
+
+        self._logger.debug("Job id %s"%job_id)
+
+        ExpResult=[]
+
+        for circuit in circuits:
+
+            if isinstance(circuit,QuantumCircuit):
+                if len(circuit.cregs)>1:
+                    c=FlattenCircuit(circuit)
+                else:
+                    c=circuit
+            else:
+                c=circuit
+
+            #print("Metadata",c.metadata)
+            if isinstance(c,QuantumCircuit) or isinstance(c,Schedule):
+                qasm=qasm3.dumps(c, basis_gates=self.operation_names).replace("\n","")
+                self._logger.debug("Obtainded QASM from circuit:%s"%qasm.replace("\n",""))
+                if "qubit[" in qasm:
+                    c=transpile(c,self,optimization_level=0)
+                    qasm=qasm3.dumps(c, basis_gates=self.operation_names).replace("\n","")
+                #print("Antes:\n",qasm)
+                for i in range(self.num_qubits-1,-1,-1):
+                    #print("$%d;"%i,"$%d;"%QBIT_MAP2[i])
+                    qasm=qasm.replace("$%d;"%i,"$%d;"%QBIT_MAP2[i])
+                    qasm=qasm.replace("$%d,"%i,"$%d,"%QBIT_MAP2[i])
+                    qasm=qasm.replace("$%d "%i,"$%d "%QBIT_MAP2[i])
+                #print(qasm)
+            else:
+                qasm=c
+
+
+            remain_shots=shots
+            ExpDict={}
+            self._logger.info("QASM to execute %s"%qasm)
+            warning_raised = False
+            while (remain_shots > 0):
+                self._logger.info("Requesting SHOTS=%d"%min(self._max_shots,remain_shots))
+                results = self._QPUBackend.run(circuit=qasm, shots=min(self._max_shots,remain_shots),repetition_period=repetition_period,res_format=res_format)
+
+                self._logger.debug("Results:%s"%results)
+                if "Exception" in results:
+                    raise QPUException(results["Exception"])
+                try:
+                    r=results["results"][list(results["results"].keys())[0]]
+                except:
+                    raise QPUException("QPU does not return results")
+                for k in r:
+                    if not memory:
+                        key=hex(int(k[::-1],base=2))
+                        ExpDict[key]=ExpDict[key]+r[k] if key in ExpDict else r[k]
+                    else:
+                        raise QmioException("Binary for the next version")
+                remain_shots=remain_shots-self._max_shots
+
+            self._QPUBackend.disconnect()
+                
+            if isinstance(c,QuantumCircuit):
+                metadata=c.metadata
+            else:
+                metadata={}
+
+            if "execution_metrics" in results:
+                metadata["execution_metrics"]=results["execution_metrics"]
+
+            metadata["repetition_period"]=repetition_period
+            metadata["res_format"]=res_format
+
+            creg_sizes=[]
+            qreg_sizes=[]
+            memory_slots=0
+            n_qubits=0
+            if isinstance(circuit,str):
+                c_copy=circuit
+                circuit=QasmCircuit()
+                circuit.circuit=c_copy
+                circuit.name="QASM"
+                c=circuit
+                print(c)
+            else:
+                for c1 in circuit.cregs:
+                    creg_sizes.append([c1.name,c1.size])
+                    memory_slots+=c1.size
+
+                for c1 in circuit.qregs:
+                    qreg_sizes.append([c1.name,c1.size])
+                n_qubits=len(circuit.qubits)
+            header ={'name': c.name, 'creg_sizes':creg_sizes, 'memory_slots':memory_slots, 'n_qubits':n_qubits,
+                           'qreg_sizes':qreg_sizes,'metadata':circuit.metadata}
+            #header.update(c.metadata)
+
+            self._logger.debug("Retorno: %s"%ExpDict)
+
+
+            dd={
+                'shots': shots,
+                'success': True,
+                'data': {
+
+                    'counts': ExpDict,
+                    'metadata': metadata,
+                },
+                'header': header,
+
+                }
+
+            ExpResult.append(dd)
+
+        result_dict = {
+            'backend_name': self._name,
+            'backend_version': self._version,
+            'qobj_id': None,
+            'job_id': job_id,
+            'success': True,
+            'results': ExpResult,
+            'date': datetime.now().isoformat(),
+
+        }
+        self._logger.debug("Final Results returned: %s"%result_dict)
+
+        results=Result.from_dict(result_dict)
+
+        job=QmioJob(backend=self,job_id=uuid.uuid4(), jobstatus=JobStatus.DONE, result=results)
+
+        return job
+
+
+
+
+    def _connect_and_run(self, run_input: Union[Union[QuantumCircuit,Schedule, str],List[Union[QuantumCircuit,Schedule,str]]], **options) -> QmioJob:
         """Run on QMIO QPU. This method is Synchronous, so it will wait for the results from the QPU
 
         Args:
@@ -586,7 +774,19 @@ class QmioBackend(BackendV2):
         job=QmioJob(backend=self,job_id=uuid.uuid4(), jobstatus=JobStatus.DONE, result=results)
         
         return job
-    
+
+    def run_public(self):
+        """
+        Public run method to expose to the user.
+        It will select the best execution method according what is going underneath
+        """
+        try:
+            if self._QPUBackend.direct is True:
+                _connect_and_run()
+            else self._QPUBackend.direct is not True:
+                _connect_run_disconnect()
+        except:
+            raise QmioException("Not direct nor indirect defined")
     
     
 def FlattenCircuit(circ: QuantumCircuit) -> QuantumCircuit:
