@@ -25,6 +25,9 @@ from typing import Union, List, Optional, Dict,  Any, TYPE_CHECKING, Union, cast
 from dataclasses import dataclass
 import warnings
 
+# Temporal to retieve direct
+import os
+
 from ..exceptions import QPUException, QmioException
 from .utils import Calibrations 
 from ..version import VERSION
@@ -387,10 +390,11 @@ class QmioBackend(BackendV2):
     def _run(self):
         """
         Just runs a set of circuits
+        This should include all the necesary logic to run a circuit or a set of circuits
         """
         pass
 
-    def _connect_and_run_disconnect(self, run_input: Union[Union[QuantumCircuit,Schedule, str],List[Union[QuantumCircuit,Schedule,str]]], **options) -> QmioJob:
+    def _connect_run_disconnect(self, run_input: Union[Union[QuantumCircuit,Schedule, str],List[Union[QuantumCircuit,Schedule,str]]], **options) -> QmioJob:
         """
         Full routine method
         """
@@ -439,10 +443,11 @@ class QmioBackend(BackendV2):
         #self._logger.debug("Starting QmioRuntimeService")
         #service = QmioRuntimeService()
 
-        if self._QPUBackend is None:
-            self._logger.debug("Starting backend")
-            self._QPUBackend=QPUBackend()
-            self._QPUBackend.connect()
+        # if self._QPUBackend is None:
+        #     self._logger.debug("Starting backend")
+        #     self._QPUBackend=QPUBackend()
+        #     self._QPUBackend.connect()
+        self.connect()
 
 
         job_id=uuid.uuid4()
@@ -502,8 +507,7 @@ class QmioBackend(BackendV2):
                         raise QmioException("Binary for the next version")
                 remain_shots=remain_shots-self._max_shots
 
-            self._QPUBackend.disconnect()
-                
+
             if isinstance(c,QuantumCircuit):
                 metadata=c.metadata
             else:
@@ -570,11 +574,9 @@ class QmioBackend(BackendV2):
         results=Result.from_dict(result_dict)
 
         job=QmioJob(backend=self,job_id=uuid.uuid4(), jobstatus=JobStatus.DONE, result=results)
+        self.disconnect()
 
         return job
-
-
-
 
     def _connect_and_run(self, run_input: Union[Union[QuantumCircuit,Schedule, str],List[Union[QuantumCircuit,Schedule,str]]], **options) -> QmioJob:
         """Run on QMIO QPU. This method is Synchronous, so it will wait for the results from the QPU
@@ -643,11 +645,12 @@ class QmioBackend(BackendV2):
         #self._logger.debug("Starting QmioRuntimeService")
         #service = QmioRuntimeService()
         
-        if self._QPUBackend is None:
-            self._logger.debug("Starting backend")
-            self._QPUBackend=QPUBackend()
-            self._QPUBackend.connect()
-                          
+        # if self._QPUBackend is None:
+        #     self._logger.debug("Starting backend")
+        #     self._QPUBackend=QPUBackend()
+        #     self._QPUBackend.connect()
+        self.connect()
+
         
         job_id=uuid.uuid4()
                           
@@ -775,20 +778,45 @@ class QmioBackend(BackendV2):
         
         return job
 
-    def run_public(self):
+    def run(self, run_input: Union[Union[QuantumCircuit,Schedule, str],List[Union[QuantumCircuit,Schedule,str]]], **options) -> QmioJob:
         """
         Public run method to expose to the user.
         It will select the best execution method according what is going underneath
         """
-        try:
-            if self._QPUBackend.direct is True:
-                _connect_and_run()
-            else self._QPUBackend.direct is not True:
-                _connect_run_disconnect()
-        except:
-            raise QmioException("Not direct nor indirect defined")
-    
-    
+        if isinstance(options,Options):
+            shots=options.get("shots",default=self._options.get("shots"))
+            memory=options.get("memory",default=self._options.get("memory"))
+            repetition_period=options.get("repetition_period",default=self._options.get("repetition_period"))
+            res_format=options.get("res_format",default=self._options.get("res_format"))
+        else:
+            if "shots" in options:
+                shots=options["shots"]
+            else:
+                shots=self._options.get("shots")
+
+            if "memory" in options:
+                memory=options["memory"]
+            else:
+                memory=self._options.get("memory")
+
+            if "repetition_period" in options:
+                repetition_period=options["repetition_period"]
+            else:
+                repetition_period=self._options.get("repetition_period")
+
+            if "res_format" in options:
+                res_format=options["res_format"]
+            else:
+                res_format=self._options.get("res_format")
+
+        server = os.getenv("ZMQ_SERVER")
+        print(server)
+        if os.getenv("ZMQ_SERVER") == "tcp://10.133.29.226:5556":
+            trabajo = self._connect_and_run(run_input, shots=shots, memory=memory, repetition_period=repetition_period, res_format=res_format)
+        else:
+            trabajo = self._connect_run_disconnect(run_input, shots=shots, memory=memory, repetition_period=repetition_period, res_format=res_format)
+        return trabajo
+
 def FlattenCircuit(circ: QuantumCircuit) -> QuantumCircuit:
     """
     Method to convert a Qiskit circuit with several ClassicalRegisters in a single ClassicalRegister
